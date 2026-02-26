@@ -117,15 +117,20 @@ read_line :: () -> string {
         if c == #char "\n" break;
         if c == #char "\r" continue;
 
-        append(*builder, tprint("%", cast(string) string.{1, buffer.data}));
+        append(*builder, c);
     }
 
     return builder_to_string(*builder);
 }
 
-crt_read :: (fd: s32, buffer: *u8, count: u32) -> s32 #foreign crt "_read";
-
-crt :: #system_library "msvcrt";
+// todo rename crt_read to something more generic
+#if OS == .WINDOWS {
+    crt :: #system_library "msvcrt";
+    crt_read :: (fd: s32, buffer: *u8, count: u32) -> s32 #foreign crt "_read";
+} else {
+    libc_io :: #system_library "libc";
+    crt_read :: (fd: s32, buffer: *u8, count: u64) -> s64 #foreign libc_io "read";
+}
 
 
 parse_array_literal :: ($ElemType: Type, s: string) -> [..] ElemType, bool {
@@ -377,7 +382,7 @@ call :: (expression: string) -> string, bool {
     if close_paren < 0 return "", false;
 
     func_name := trim(slice(expression, 0, paren_pos));
-    args_str := slice(expression, paren_pos + 1, close_paren - paren_pos - 1);
+    args_str := trim(slice(expression, paren_pos + 1, close_paren - paren_pos - 1));
 
     func_name = expand_function_name(func_name);
 
@@ -395,7 +400,7 @@ call :: (expression: string) -> string, bool {
             return "", false;
         }
         for resolved {
-            array_add(*resolved_args, it);
+            array_add(*resolved_args, trim(it));  // <-- ADD trim HERE
         }
     }
 

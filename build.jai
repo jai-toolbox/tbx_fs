@@ -54,6 +54,8 @@ OUTPUT_EXECUTABLE_NAME := "eval_dispatch";
         "change_directory",
         "list_files",
         "list_directories",
+        "list",
+        "list_with_size",
         "add_all_files_in_directory_to_selection",
         "filter_selection_by_extension",
         "create_directory",
@@ -63,6 +65,8 @@ OUTPUT_EXECUTABLE_NAME := "eval_dispatch";
         "print_help",
         "list_available_functions",
         "interactive",
+        "search_recursively_for_file_contents",
+        "rename",
         "quit"
     ];
 

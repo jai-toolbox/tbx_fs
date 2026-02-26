@@ -12,6 +12,7 @@ because that's one of the biggest annoyances in regex is that simple or intermed
 #import "File";
 #import "File_Utilities";
 #import "String";
+#load "file.jai";
 
 #if OS == .WINDOWS {
     kernel32 :: #system_library "kernel32";
@@ -38,6 +39,8 @@ DISPATCH_NAMES :: string.[
     "change_directory",
     "list_files",
     "list_directories",
+    "list",
+    "list_with_size",
     "add_all_files_in_directory_to_selection",
     "filter_selection_by_extension",
     "create_directory",
@@ -47,9 +50,40 @@ DISPATCH_NAMES :: string.[
     "print_help",
     "list_available_functions",
     "interactive",
+    "search_recursively_for_file_contents",
+    "rename",
     "quit"
 ];
 
+#if OS != .WINDOWS {
+    posix :: #system_library "libc";
+    getenv :: (name: *u8) -> *u8 #foreign posix;
+}
+
+expand_tilde :: (path: string) -> string {
+    #if OS == .WINDOWS {
+        return path;  // no tilde expansion on windows
+    } else {
+        if path.count == 0 return path;
+        if path[0] != #char "~" return path;
+        
+        home := getenv(temp_c_string("HOME"));
+        if home == null return path;
+        
+        home_str := to_string(home);
+        
+        if path.count == 1 {
+            return home_str;  // just "~"
+        }
+        if path[1] == #char "/" {
+            rest : string;
+            rest.data  = path.data + 2;
+            rest.count = path.count - 2;
+            return tprint("%/%", home_str, rest);
+        }
+        return path;
+    }
+}
 
 
 change_directory :: (new_dir : string) {
@@ -58,11 +92,7 @@ change_directory :: (new_dir : string) {
         return;
     }
 
-    if current_directory.count > 0 {
-        free(current_directory);
-    }
-
-    dir := new_dir;
+    dir := expand_tilde(trim(new_dir));
 
     // strip trailing slash if present (unless it's the root "/")
     if dir.count > 1 && (dir[dir.count-1] == #char "/" || dir[dir.count-1] == #char "\\") {
@@ -73,16 +103,13 @@ change_directory :: (new_dir : string) {
     is_absolute := false;
 
     #if OS == .WINDOWS {
-        // absolute if starts with drive letter like "c:\" or "c:/"
         if dir.count >= 3 && dir[1] == #char ":" && (dir[2] == #char "\\" || dir[2] == #char "/") {
             is_absolute = true;
         }
-        // also handle unc paths like "\\server\share"
         if dir.count >= 2 && dir[0] == #char "\\" && dir[1] == #char "\\" {
             is_absolute = true;
         }
     } else {
-        // on unix, absolute paths start with "/"
         if dir.count >= 1 && dir[0] == #char "/" {
             is_absolute = true;
         }
@@ -93,24 +120,248 @@ change_directory :: (new_dir : string) {
     if is_absolute {
         resolved_path = dir;
     } else {
-        // relative path: join with current_directory
         if current_directory.count > 0 {
             resolved_path = tprint("%/%", current_directory, dir);
         } else {
-            // no current directory set; treat as-is (could be relative to cwd)
             resolved_path = dir;
         }
     }
 
+    // free the old current_directory, after we're done using it
+    old_dir := current_directory;
+
     if !file_exists(resolved_path) {
         print("ERROR: Directory '%' does not exist.\n", resolved_path);
-        // still set it so the user can see what was attempted
         current_directory = copy_string(resolved_path);
+        if old_dir.count > 0  free(old_dir);
         return;
     }
 
     current_directory = copy_string(resolved_path);
+    if old_dir.count > 0  free(old_dir);
     print("Changed directory to '%'\n", current_directory);
+}
+
+list :: () -> [..] string {
+    results: [..] string;
+
+    if current_directory.count == 0 {
+        print("ERROR: No current directory set. Use change_directory first.\n");
+        return results;
+    }
+
+    visitor :: (info: *File_Visit_Info, results: *[..] string) {
+        array_add(results, copy_string(info.full_name));
+    }
+
+    visit_files(current_directory, false, *results, visitor, visit_directories = true);
+
+    print("Contents of '%' (% items):\n", current_directory, results.count);
+    for results {
+        // check if it's a directory by seeing if it has files inside or ends with separator
+        // simple approach: just print the name
+        print("  [%] %\n", it_index, it);
+    }
+
+    return results;
+}
+
+#if OS == .WINDOWS {
+    // already have kernel32 declared above
+    WIN32_FILE_ATTRIBUTE_DATA :: struct {
+        dwFileAttributes: u32;
+        ftCreationTime:   [2] u32;
+        ftLastAccessTime: [2] u32;
+        ftLastWriteTime:  [2] u32;
+        nFileSizeHigh:    u32;
+        nFileSizeLow:     u32;
+    }
+    GetFileAttributesExA :: (lpFileName: *u8, fInfoLevelId: s32, lpFileInformation: *void) -> s32 #foreign kernel32;
+} else {
+    stat_t :: struct {
+        st_dev:     u64;
+        st_ino:     u64;
+        st_nlink:   u64;
+        st_mode:    u32;
+        st_uid:     u32;
+        st_gid:     u32;
+        __pad0:     u32;
+        st_rdev:    u64;
+        st_size:    s64;
+        st_blksize: s64;
+        st_blocks:  s64;
+        st_atime:   s64;
+        st_atime_nsec: s64;
+        st_mtime:   s64;
+        st_mtime_nsec: s64;
+        st_ctime:   s64;
+        st_ctime_nsec: s64;
+        __unused:   [3] s64;
+    }
+    c_stat :: (pathname: *u8, statbuf: *stat_t) -> s32 #foreign libc "stat";
+}
+
+get_file_size :: (path: string) -> s64, bool {
+    #if OS == .WINDOWS {
+        data: WIN32_FILE_ATTRIBUTE_DATA;
+        result := GetFileAttributesExA(temp_c_string(path), 0, *data);
+        if result == 0  return 0, false;
+        size: s64 = (cast(s64) data.nFileSizeHigh << 32) | cast(s64) data.nFileSizeLow;
+        return size, true;
+    } else {
+        buf: stat_t;
+        result := c_stat(temp_c_string(path), *buf);
+        if result != 0  return 0, false;
+        return buf.st_size, true;
+    }
+}
+
+format_file_size :: (size: s64) -> string {
+    if size < 1024 {
+        return tprint("% B", size);
+    }
+    if size < 1024 * 1024 {
+        val := cast(float64) size / 1024.0;
+        whole := cast(s64) val;
+        frac  := cast(s64) ((val - cast(float64) whole) * 100.0);
+        if frac < 0  frac = -frac;
+        return tprint("%.% KB", whole, frac);
+    }
+    if size < 1024 * 1024 * 1024 {
+        val := cast(float64) size / (1024.0 * 1024.0);
+        whole := cast(s64) val;
+        frac  := cast(s64) ((val - cast(float64) whole) * 100.0);
+        if frac < 0  frac = -frac;
+        return tprint("%.% MB", whole, frac);
+    }
+    val := cast(float64) size / (1024.0 * 1024.0 * 1024.0);
+    whole := cast(s64) val;
+    frac  := cast(s64) ((val - cast(float64) whole) * 100.0);
+    if frac < 0  frac = -frac;
+    return tprint("%.% GB", whole, frac);
+}
+
+list_with_size :: () -> [..] string {
+    results: [..] string;
+
+    if current_directory.count == 0 {
+        print("ERROR: No current directory set. Use change_directory first.\n");
+        return results;
+    }
+
+    Entry :: struct {
+        path:  string;
+        is_dir: bool;
+    }
+
+    entries: [..] Entry;
+
+    visitor :: (info: *File_Visit_Info, entries: *[..] Entry) {
+        entry: Entry;
+        entry.path   = copy_string(info.full_name);
+        entry.is_dir = info.is_directory;
+        array_add(entries, entry);
+    }
+
+    visit_files(current_directory, false, *entries, visitor, visit_directories = true);
+
+    total_size: s64 = 0;
+
+    print("Contents of '%' (% items):\n", current_directory, entries.count);
+
+    for entries {
+        if it.is_dir {
+            formatted := sprint("  [%] %/  <DIR>", it_index, it.path);
+            print("%\n", formatted);
+            array_add(*results, formatted);
+        } else {
+            size, ok := get_file_size(it.path);
+            size_str: string;
+            if ok {
+                total_size += size;
+                size_str = format_file_size(size);
+            } else {
+                size_str = "???";
+            }
+            formatted := sprint("  [%] %  (%)", it_index, it.path, size_str);
+            print("%\n", formatted);
+            array_add(*results, formatted);
+        }
+        free(it.path);
+    }
+    array_free(entries);
+
+    summary := sprint("  Total: %", format_file_size(total_size));
+    print("%\n", summary);
+    array_add(*results, summary);
+
+    return results;
+}
+
+rename :: (path: string, new_name: string) -> bool {
+    if path.count == 0 {
+        print("ERROR: No path specified.\n");
+        return false;
+    }
+
+    if new_name.count == 0 {
+        print("ERROR: No new name specified.\n");
+        return false;
+    }
+
+    // resolve full path if relative
+    full_path: string;
+    if current_directory.count > 0 && path[0] != #char "/" {
+        #if OS == .WINDOWS {
+            if !(path.count >= 3 && path[1] == #char ":" && (path[2] == #char "\\" || path[2] == #char "/")) {
+                full_path = tprint("%/%", current_directory, path);
+            } else {
+                full_path = path;
+            }
+        } else {
+            full_path = tprint("%/%", current_directory, path);
+        }
+    } else {
+        full_path = path;
+    }
+
+    if !file_exists(full_path) {
+        print("ERROR: '%' does not exist.\n", full_path);
+        return false;
+    }
+
+    // build the new path: same parent directory, new name
+    last_sep := -1;
+    for i : 0..full_path.count - 1 {
+        c := full_path[i];
+        if c == #char "/" || c == #char "\\" {
+            last_sep = i;
+        }
+    }
+
+    new_path: string;
+    if last_sep >= 0 {
+        parent: string;
+        parent.data  = full_path.data;
+        parent.count = last_sep;
+        new_path = tprint("%/%", parent, new_name);
+    } else {
+        new_path = new_name;
+    }
+
+    if file_exists(new_path) {
+        print("ERROR: '%' already exists. Cannot rename.\n", new_path);
+        return false;
+    }
+
+    ok := rename_file_on_disk(full_path, new_path);
+    if !ok {
+        print("ERROR: Failed to rename '%' -> '%'\n", full_path, new_path);
+        return false;
+    }
+
+    print("Renamed '%' -> '%'\n", full_path, new_path);
+    return true;
 }
 
 go_up_directory :: () {
@@ -176,6 +427,42 @@ go_up_directory :: () {
     free(old);
 
     print("Changed directory to '%'\n", current_directory);
+}
+
+ search_recursively_for_file_contents :: (pattern: string) -> string {
+    max_line_length: int = 120;
+
+    if current_directory.count == 0 {
+        return copy_string("ERROR: No current directory set. Use change_directory first.\n");
+    }
+
+    search_results := search_recursively_for_file_contents(pattern, current_directory);
+    defer {
+        for search_results {
+            free(it.file_path);
+            free(it.line_text);
+        }
+        array_free(search_results);
+    }
+
+    builder: String_Builder;
+    defer free_buffers(*builder);
+
+    append(*builder, sprint("Search results for '%' in '%' (% matches):\n", pattern, current_directory, search_results.count));
+
+    for search_results {
+        line_text := it.line_text;
+        if line_text.count > max_line_length {
+            line_text.count = max_line_length;
+            append(*builder, sprint("  %:%:% ...\n", it.file_path, it.line_number, line_text));
+        } else {
+            append(*builder, sprint("  %:%:%\n", it.file_path, it.line_number, line_text));
+        }
+    }
+
+    result := builder_to_string(*builder);
+    print("%", result);
+    return result;
 }
 
 go_down_directory :: (subdir_name : string) {
