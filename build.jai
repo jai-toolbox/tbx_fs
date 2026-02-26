@@ -58,6 +58,8 @@ OUTPUT_EXECUTABLE_NAME := "eval_dispatch";
         "filter_selection_by_extension",
         "create_directory",
         "create_file",
+        "go_up_directory",
+        "go_down_directory",
         "print_help",
         "list_available_functions",
         "interactive",

@@ -2,6 +2,8 @@
 #import "String";
 #import "Hash_Table";
 
+#load "abbreviations.jai";
+
 
 should_quit := false;
 
@@ -26,6 +28,11 @@ Supports nested calls and multi-return spreading:
     Arguments that are function calls are evaluated first,
     and multi-return values are spread into the parent args.
 
+Abbreviations:
+    Each function has a unique short abbreviation.
+    Use list_available_functions() to see abbreviations.
+    e.g. if add -> a, mul -> m, then m(a(3,5),4) works.
+
 Use list_available_functions() to see all available functions.
 DONE;
     return help;
@@ -34,14 +41,40 @@ DONE;
 list_available_functions :: () -> string {
     builder: String_Builder;
     append(*builder, "Available functions:\n\n");
+
+    // first pass: find the longest abbreviation for alignment
+    max_abbr_len := 0;
     for dispatch_signatures {
-        append(*builder, tprint("  %\n", it));
+        name := it_index;
+        abbr, found := table_find(*name_to_abbreviation, name);
+        if found && !equal(abbr, name) {
+            if abbr.count > max_abbr_len  max_abbr_len = abbr.count;
+        } else {
+            if name.count > max_abbr_len  max_abbr_len = name.count;
+        }
     }
+
+    // second pass: print with aligned colons
+    for dispatch_signatures {
+        name := it_index;
+        sig  := it;
+        abbr, found := table_find(*name_to_abbreviation, name);
+        label := ifx found && !equal(abbr, name) then abbr else name;
+        padding := max_abbr_len - label.count;
+
+        append(*builder, "  ");
+        append(*builder, label);
+        for 0..padding-1  append(*builder, " ");
+        append(*builder, " : ");
+        append(*builder, sig);
+        append(*builder, "\n");
+    }
+
     return builder_to_string(*builder);
 }
 
 interactive :: () -> string {
-    print("Entering interactive mode. Type quit() to exit.\n\n");
+    print("Entering interactive mode. Type quit() or q() to exit.\n\n");
 
     while !should_quit {
         print(">> ");
@@ -188,7 +221,7 @@ is_function_call :: (s: string) -> bool {
     return true;
 }
 
-resolve_arg :: (arg: string) -> [..] string, bool { // returns a list because of multiple return arguments.
+resolve_arg :: (arg: string) -> [..] string, bool {
     results: [..] string;
     trimmed := trim(arg);
 
@@ -196,8 +229,6 @@ resolve_arg :: (arg: string) -> [..] string, bool { // returns a list because of
         result, ok := call(trimmed);
         if !ok return results, false;
 
-        // split the result in case of multi-return (comma-separated)
-        // use bracket/paren-aware splitting so array literals don't get broken
         parts := split_call_args(result);
         for parts {
             array_add(*results, it);
@@ -293,6 +324,51 @@ DispatchFn :: #type (args: [] string) -> (string, bool);
 dispatch_table:      Table(string, DispatchFn);
 dispatch_signatures: Table(string, string);
 
+abbreviation_to_name: Table(string, string);  // abbr -> full_name
+name_to_abbreviation: Table(string, string);  // full_name -> abbr
+
+
+// build abbreviation tables from all currently registered function names.
+build_abbreviation_tables :: () {
+    names: [..] string;
+    defer array_free(names);
+
+    for dispatch_table {
+        array_add(*names, it_index);
+    }
+
+    if names.count == 0 return;
+
+    abbr_result := min_abbreviations(names);
+    if !abbr_result.success {
+        print("Warning: could not compute unique abbreviations for all functions.\n");
+        return;
+    }
+    defer array_free(abbr_result.abbreviations);
+
+    for i: 0..names.count-1 {
+        abbr := copy_string(abbr_result.abbreviations[i]);
+        name := copy_string(names[i]);
+        table_set(*name_to_abbreviation, name, abbr);
+        table_set(*abbreviation_to_name, abbr, name);
+    }
+}
+
+// expand a function name: if it's an abbreviation, return the full name.
+// if it's already a full name, return it as-is.
+expand_function_name :: (name: string) -> string {
+    // check if it's already a registered full name
+    _, found_direct := table_find(*dispatch_table, name);
+    if found_direct return name;
+
+    // check if it's an abbreviation
+    full_name, found_abbr := table_find(*abbreviation_to_name, name);
+    if found_abbr return full_name;
+
+    return name;
+}
+
+
 call :: (expression: string) -> string, bool {
     paren_pos := find_index_from_left(expression, cast(u8) #char "(");
     if paren_pos < 0 return "", false;
@@ -303,10 +379,11 @@ call :: (expression: string) -> string, bool {
     func_name := trim(slice(expression, 0, paren_pos));
     args_str := slice(expression, paren_pos + 1, close_paren - paren_pos - 1);
 
+    func_name = expand_function_name(func_name);
+
     raw_args := split_call_args(args_str);
     defer array_free(raw_args);
 
-    // resolve nested calls; multi-return values get spread into multiple args
     resolved_args: [..] string;
     defer array_free(resolved_args);
 
@@ -336,6 +413,7 @@ call :: (expression: string) -> string, bool {
 
 main :: () {
     __register_dispatchers();
+    build_abbreviation_tables();
 
     args := get_command_line_arguments();
 

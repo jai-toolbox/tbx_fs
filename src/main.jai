@@ -1,3 +1,11 @@
+/*
+
+- to make using this easier we should do intelligent abbreviations of commands so you don't have to type the long form all the time.
+- while also supporting regex, there should also be deciated commands for listing out thigns that match a file extension or have a substring that matches
+because that's one of the biggest annoyances in regex is that simple or intermediate level of requests just make you have to go and open up regex 101 again.
+
+
+*/
 #load "dispatch.jai";
 
 #import "Basic";
@@ -15,16 +23,10 @@
     c_mkdir  :: (pathname: *u8, mode: u32) -> s32 #foreign libc "mkdir";
 }
 
-// -------------------------------------------------------------------------
-// State
-// -------------------------------------------------------------------------
 
 current_file_selection : [..] string;
 current_directory      : string;
 
-// -------------------------------------------------------------------------
-// Dispatch table
-// -------------------------------------------------------------------------
 
 DISPATCH_NAMES :: string.[
     "print_current_file_selection",
@@ -35,37 +37,173 @@ DISPATCH_NAMES :: string.[
     "change_extension_of_all_selected_files",
     "change_directory",
     "list_files",
+    "list_directories",
     "add_all_files_in_directory_to_selection",
     "filter_selection_by_extension",
     "create_directory",
     "create_file",
+    "go_up_directory",
+    "go_down_directory",
     "print_help",
     "list_available_functions",
     "interactive",
     "quit"
 ];
 
-// -------------------------------------------------------------------------
-// Directory functions
-// -------------------------------------------------------------------------
+
 
 change_directory :: (new_dir : string) {
+    if new_dir.count == 0 {
+        print("ERROR: No directory specified.\n");
+        return;
+    }
+
     if current_directory.count > 0 {
         free(current_directory);
     }
 
     dir := new_dir;
+
+    // strip trailing slash if present (unless it's the root "/")
     if dir.count > 1 && (dir[dir.count-1] == #char "/" || dir[dir.count-1] == #char "\\") {
         dir.count -= 1;
     }
 
-    if !file_exists(dir) {
-        print("ERROR: Directory '%' does not exist.\n", dir);
-        current_directory = copy_string(dir);
+    // determine if path is absolute or relative
+    is_absolute := false;
+
+    #if OS == .WINDOWS {
+        // absolute if starts with drive letter like "c:\" or "c:/"
+        if dir.count >= 3 && dir[1] == #char ":" && (dir[2] == #char "\\" || dir[2] == #char "/") {
+            is_absolute = true;
+        }
+        // also handle unc paths like "\\server\share"
+        if dir.count >= 2 && dir[0] == #char "\\" && dir[1] == #char "\\" {
+            is_absolute = true;
+        }
+    } else {
+        // on unix, absolute paths start with "/"
+        if dir.count >= 1 && dir[0] == #char "/" {
+            is_absolute = true;
+        }
+    }
+
+    resolved_path : string;
+
+    if is_absolute {
+        resolved_path = dir;
+    } else {
+        // relative path: join with current_directory
+        if current_directory.count > 0 {
+            resolved_path = tprint("%/%", current_directory, dir);
+        } else {
+            // no current directory set; treat as-is (could be relative to cwd)
+            resolved_path = dir;
+        }
+    }
+
+    if !file_exists(resolved_path) {
+        print("ERROR: Directory '%' does not exist.\n", resolved_path);
+        // still set it so the user can see what was attempted
+        current_directory = copy_string(resolved_path);
         return;
     }
 
-    current_directory = copy_string(dir);
+    current_directory = copy_string(resolved_path);
+    print("Changed directory to '%'\n", current_directory);
+}
+
+go_up_directory :: () {
+    if current_directory.count == 0 {
+        print("ERROR: No current directory set. Use change_directory first.\n");
+        return;
+    }
+
+    // find the last path separator to determine the parent directory
+    last_sep := -1;
+    for i : 0..current_directory.count-1 {
+        c := current_directory[i];
+        if c == #char "/" || c == #char "\\" {
+            last_sep = i;
+        }
+    }
+
+    if last_sep < 0 {
+        print("ERROR: Already at the top-level relative path '%'. Cannot go up.\n", current_directory);
+        return;
+    }
+
+    // handle root directory cases
+    #if OS == .WINDOWS {
+        // don't go above "c:\" (last_sep would be 2 for "c:\something")
+        if last_sep <= 2 && current_directory.count >= 3 && current_directory[1] == #char ":" {
+            parent : string;
+            parent.data  = current_directory.data;
+            parent.count = 3; // e.g. "C:\"
+            if parent == current_directory {
+                print("ERROR: Already at root '%'. Cannot go up.\n", current_directory);
+                return;
+            }
+            // go to root
+            old := current_directory;
+            current_directory = copy_string(parent);
+            free(old);
+            print("Changed directory to '%'\n", current_directory);
+            return;
+        }
+    } else {
+        // don't go above "/"
+        if last_sep == 0 {
+            if current_directory.count == 1 {
+                print("ERROR: Already at root '/'. Cannot go up.\n");
+                return;
+            }
+            // go to root "/"
+            old := current_directory;
+            current_directory = copy_string("/");
+            free(old);
+            print("Changed directory to '%'\n", current_directory);
+            return;
+        }
+    }
+
+    parent : string;
+    parent.data  = current_directory.data;
+    parent.count = last_sep;
+
+    old := current_directory;
+    current_directory = copy_string(parent);
+    free(old);
+
+    print("Changed directory to '%'\n", current_directory);
+}
+
+go_down_directory :: (subdir_name : string) {
+    if current_directory.count == 0 {
+        print("ERROR: No current directory set. Use change_directory first.\n");
+        return;
+    }
+
+    if subdir_name.count == 0 {
+        // list available subdirectories so the user can pick one
+        print("Available subdirectories:\n");
+        dirs := list_directories();
+        for dirs free(it);
+        array_free(dirs);
+        return;
+    }
+
+    new_path := tprint("%/%", current_directory, subdir_name);
+
+    if !file_exists(new_path) {
+        print("ERROR: Subdirectory '%' does not exist in '%'.\n", subdir_name, current_directory);
+        return;
+    }
+
+    old := current_directory;
+    current_directory = copy_string(new_path);
+    free(old);
+
     print("Changed directory to '%'\n", current_directory);
 }
 
@@ -155,9 +293,6 @@ filter_selection_by_extension :: (extension : string) {
     print("Filtered selection to '*%' (% files remain).\n", ext, current_file_selection.count);
 }
 
-// -------------------------------------------------------------------------
-// Create directory / file
-// -------------------------------------------------------------------------
 
 create_directory :: (dir_name : string) -> bool {
     path : string;
@@ -215,9 +350,6 @@ create_file :: (file_name : string) -> bool {
     return true;
 }
 
-// -------------------------------------------------------------------------
-// File selection functions
-// -------------------------------------------------------------------------
 
 print_current_file_selection :: () {
     if current_file_selection.count == 0 {
@@ -248,10 +380,6 @@ add_files_to_selection :: (files : [] string) {
         array_add(*current_file_selection, copy_string(it));
     }
 }
-
-// -------------------------------------------------------------------------
-// Extension changing
-// -------------------------------------------------------------------------
 
 rename_file_on_disk :: (old_path : string, new_path : string) -> bool {
     old_c := temp_c_string(old_path);
